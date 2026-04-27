@@ -1,0 +1,62 @@
+name: 'Azure Enterprise Foundation CD'
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/**'
+      - 'backend/**'
+      - 'terraform/**'
+      - '.github/workflows/release.yml'
+
+jobs:
+  validate-and-test:
+    name: 'Platform Logic Validation'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Source
+      uses: actions/checkout@v3
+
+    - name: Run Pytest
+      run: |
+        pip install pytest fastapi httpx
+        pytest tests/
+
+  build-and-push:
+    name: 'Foundation Release'
+    needs: validate-and-test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Azure CLI Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Build & Push ALZ API
+      run: |
+        az acr login --name acralz
+        docker build -t acralz.azurecr.io/devopstrio/alz-platform-api:${{ github.sha }} ./backend
+        docker push acralz.azurecr.io/devopstrio/alz-platform-api:${{ github.sha }}
+
+    - name: Build & Push Governance Engine
+      run: |
+        docker build -t acralz.azurecr.io/devopstrio/governance-engine:${{ github.sha }} ./apps/governance-engine
+        docker push acralz.azurecr.io/devopstrio/governance-engine:${{ github.sha }}
+
+  aks-rollout:
+    name: 'Platform Deployment'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+    - name: AKS Set Context
+      uses: azure/aks-set-context@v3
+      with:
+        resource-group: 'rg-mgmt-hub-uks-01'
+        cluster-name: 'aks-alz-foundation-prd'
+
+    - name: Helm Upgrade
+      run: |
+        helm upgrade --install alz-foundation ./helm/azure-enterprise-landing-zone-starter \
+        --namespace alz-foundation-prod --create-namespace \
+        --set api.image.tag=${{ github.sha }}
